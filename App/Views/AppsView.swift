@@ -299,6 +299,9 @@ struct AppsView: View {
 
     // MARK: - Install helpers
     private func initiateInstall(for app: FeedApp) {
+        // DEBUG: show versions parsed from feed
+        print("DEBUG: app.versions for \(app.bundleIdentifier) = \(app.versions)")
+
         // Pick first/most-recent version
         guard let version = app.versions.first else {
             installStatusMap[app.bundleIdentifier] = appLanguage == "ar" ? "لا توجد نسخة متاحة" : "No versions available"
