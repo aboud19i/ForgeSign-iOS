@@ -64,6 +64,7 @@ struct FeedApp: Codable, Identifiable {
         case ipa
         case download
         case downloadURL
+        case down
         case url
         case version
         case filesize
@@ -120,9 +121,10 @@ struct FeedApp: Codable, Identifiable {
         } else {
             // Some feeds put ipa/download fields at the app root (single-version). Try to detect common keys.
             var topLevelURLString: String? = nil
-            if let s = try? container.decode(String.self, forKey: .ipa) { topLevelURLString = s }
+            if let s = try? container.decode(String.self, forKey: .downloadURL) { topLevelURLString = s }
+            if topLevelURLString == nil, let s = try? container.decode(String.self, forKey: .down) { topLevelURLString = s }
             if topLevelURLString == nil, let s = try? container.decode(String.self, forKey: .download) { topLevelURLString = s }
-            if topLevelURLString == nil, let s = try? container.decode(String.self, forKey: .downloadURL) { topLevelURLString = s }
+            if topLevelURLString == nil, let s = try? container.decode(String.self, forKey: .ipa) { topLevelURLString = s }
             if topLevelURLString == nil, let s = try? container.decode(String.self, forKey: .url) { topLevelURLString = s }
 
             let topVersion = (try? container.decode(String.self, forKey: .version)) ?? "1.0"
@@ -167,6 +169,7 @@ struct FeedVersion: Codable {
         case size
         case ipa
         case download
+        case down
         case url
         case filesize
     }
@@ -184,6 +187,8 @@ struct FeedVersion: Codable {
 
         // try common URL keys
         if let urlString = try? container.decode(String.self, forKey: .downloadURL) {
+            self.downloadURL = URL(string: urlString)
+        } else if let urlString = try? container.decode(String.self, forKey: .down) {
             self.downloadURL = URL(string: urlString)
         } else if let urlString = try? container.decode(String.self, forKey: .ipa) {
             self.downloadURL = URL(string: urlString)
