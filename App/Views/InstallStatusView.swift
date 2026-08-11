@@ -11,8 +11,8 @@ struct InstallStatusView: View {
                 // Prefer signing.phase unless it's .idle — show installController.installStatus otherwise
                 switch signing.phase {
                 case .idle:
-                    if let inst = installController.installStatus, !inst.isEmpty {
-                        Text(inst).font(.headline)
+                    if !installController.installStatus.isEmpty {
+                        Text(installController.installStatus).font(.headline)
                             .foregroundColor(.secondary)
                     } else {
                         Text("Idle").font(.headline)
