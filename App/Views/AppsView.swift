@@ -28,7 +28,6 @@ struct AppsView: View {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return store.apps }
         return store.apps.filter { app in
-            let lower = query.localizedCaseInsensitiveContains
             if let title = app.title, title.localizedCaseInsensitiveContains(query) { return true }
             if let developer = app.developer, developer.localizedCaseInsensitiveContains(query) { return true }
             if app.bundleIdentifier.localizedCaseInsensitiveContains(query) { return true }
