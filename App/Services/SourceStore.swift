@@ -33,7 +33,7 @@ class SourceStore: ObservableObject {
 
                 do {
                     let decodedResponse = try JSONDecoder().decode(SourceFeed.self, from: data)
-                    self?.apps = decodedResponse.apps ?? []
+                    self?.apps = decodedResponse.apps
                 } catch {
                     print("Failed to decode JSON: \(error)")
                 }
