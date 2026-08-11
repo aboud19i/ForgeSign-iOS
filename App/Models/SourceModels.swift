@@ -60,6 +60,14 @@ struct FeedApp: Codable, Identifiable {
         case imageURL
         case image
         case versions
+        // common top-level single-version keys
+        case ipa
+        case download
+        case downloadURL
+        case url
+        case version
+        case filesize
+        case size
     }
 
     init(from decoder: Decoder) throws {
@@ -106,10 +114,30 @@ struct FeedApp: Codable, Identifiable {
             self.imageURL = nil
         }
 
-        if let versionsList = try? container.decode([FeedVersion].self, forKey: .versions) {
+        // Try to decode explicit versions array first
+        if let versionsList = try? container.decode([FeedVersion].self, forKey: .versions), !versionsList.isEmpty {
             self.versions = versionsList
         } else {
-            self.versions = []
+            // Some feeds put ipa/download fields at the app root (single-version). Try to detect common keys.
+            var topLevelURLString: String? = nil
+            if let s = try? container.decode(String.self, forKey: .ipa) { topLevelURLString = s }
+            if topLevelURLString == nil, let s = try? container.decode(String.self, forKey: .download) { topLevelURLString = s }
+            if topLevelURLString == nil, let s = try? container.decode(String.self, forKey: .downloadURL) { topLevelURLString = s }
+            if topLevelURLString == nil, let s = try? container.decode(String.self, forKey: .url) { topLevelURLString = s }
+
+            let topVersion = (try? container.decode(String.self, forKey: .version)) ?? "1.0"
+            // size can be under several keys and sometimes as string
+            var topSize: Int64? = nil
+            if let sVal = try? container.decode(Int64.self, forKey: .size) { topSize = sVal }
+            else if let sVal = try? container.decode(Int64.self, forKey: .filesize) { topSize = sVal }
+            else if let sStr = try? container.decode(String.self, forKey: .size), let n = Int64(sStr) { topSize = n }
+            else if let sStr = try? container.decode(String.self, forKey: .filesize), let n = Int64(sStr) { topSize = n }
+
+            if let urlStr = topLevelURLString, let url = URL(string: urlStr) {
+                self.versions = [FeedVersion(version: topVersion, downloadURL: url, size: topSize)]
+            } else {
+                self.versions = []
+            }
         }
     }
 
@@ -137,19 +165,48 @@ struct FeedVersion: Codable {
         case version
         case downloadURL
         case size
+        case ipa
+        case download
+        case url
+        case filesize
+    }
+
+    // Add convenience initializer so callers can construct programmatically
+    init(version: String, downloadURL: URL?, size: Int64?) {
+        self.version = version
+        self.downloadURL = downloadURL
+        self.size = size
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.version = (try? container.decode(String.self, forKey: .version)) ?? "1.0"
 
+        // try common URL keys
         if let urlString = try? container.decode(String.self, forKey: .downloadURL) {
+            self.downloadURL = URL(string: urlString)
+        } else if let urlString = try? container.decode(String.self, forKey: .ipa) {
+            self.downloadURL = URL(string: urlString)
+        } else if let urlString = try? container.decode(String.self, forKey: .download) {
+            self.downloadURL = URL(string: urlString)
+        } else if let urlString = try? container.decode(String.self, forKey: .url) {
             self.downloadURL = URL(string: urlString)
         } else {
             self.downloadURL = nil
         }
 
-        self.size = try? container.decode(Int64.self, forKey: .size)
+        // size under different possible keys
+        if let s = try? container.decode(Int64.self, forKey: .size) {
+            self.size = s
+        } else if let s = try? container.decode(Int64.self, forKey: .filesize) {
+            self.size = s
+        } else if let sStr = try? container.decode(String.self, forKey: .size), let n = Int64(sStr) {
+            self.size = n
+        } else if let sStr = try? container.decode(String.self, forKey: .filesize), let n = Int64(sStr) {
+            self.size = n
+        } else {
+            self.size = nil
+        }
     }
 
     func encode(to encoder: Encoder) throws {
