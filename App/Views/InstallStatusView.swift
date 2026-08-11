@@ -2,15 +2,31 @@ import SwiftUI
 
 struct InstallStatusView: View {
     @ObservedObject var signing: SigningService
+    @ObservedObject var installController: InstallController
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 18) {
+                // Prefer signing.phase unless it's .idle — show installController.installStatus otherwise
                 switch signing.phase {
                 case .idle:
-                    Text("Idle").font(.headline)
-                        .foregroundColor(.secondary)
+                    if let inst = installController.installStatus, !inst.isEmpty {
+                        Text(inst).font(.headline)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Idle").font(.headline)
+                            .foregroundColor(.secondary)
+                    }
+                case .downloading:
+                    VStack {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle())
+                            .scaleEffect(1.4)
+                            .padding(.bottom, 8)
+                        Text("Downloading...")
+                            .font(.body)
+                    }
                 case .signing:
                     VStack {
                         ProgressView()
