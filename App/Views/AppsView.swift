@@ -294,7 +294,7 @@ struct AppsView: View {
             let p12Password = cert.password ?? ""
 
             // pick a provisioning profile (simplest: first one)
-            let profileURL = profileStore.profiles.first?.fileURL
+            let profileURL = profileStore.profiles.first.map { profileStore.fileURL(for: $0) }
             guard let profile = profileURL else {
                 await MainActor.run {
                     signing.phase = .failed("No provisioning profile available.")
