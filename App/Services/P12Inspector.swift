@@ -52,7 +52,9 @@ enum P12Inspector {
         guard status == 0 else { return nil }
 
         func string(_ buffer: [CChar]) -> String? {
-            let s = String(cString: buffer)
+            // Decode CChar buffer safely as UTF-8 up to the first NUL
+            let bytes = buffer.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+            let s = String(decoding: bytes, as: UTF8.self)
             return s.isEmpty ? nil : s
         }
         return P12Info(commonName: string(cnBuf),
