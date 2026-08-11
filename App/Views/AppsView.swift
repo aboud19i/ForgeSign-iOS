@@ -3,10 +3,16 @@ import SwiftUI
 struct AppsView: View {
     @Environment(\.forgeTheme) private var T
     @EnvironmentObject private var store: SourceStore
+    @EnvironmentObject private var certStore: CertificateStore
+    @EnvironmentObject private var profileStore: ProfileStore
     @AppStorage("appLanguage") private var appLanguage: String = "ar"
 
+    @StateObject private var signing = SigningService()
     @State private var selectedApp: FeedApp?
     @State private var showSourcesSettings = false
+    @State private var showCertificatesSheet = false
+    @State private var showInstallStatus = false
+    @State private var installingVersion: FeedVersion? = nil
 
     var featuredApps: [FeedApp] {
         Array(store.apps.prefix(5))
@@ -211,13 +217,118 @@ struct AppsView: View {
                     }
                 }
                 .sheet(item: $selectedApp) { app in
-                    AppDetailSheet(app: app, onInstall: { _ in })
+                    // Pass a real onInstall handler so installs start immediately
+                    AppDetailSheet(app: app, onInstall: { version in
+                        startInstall(for: app, version: version)
+                    })
                 }
                 .sheet(isPresented: $showSourcesSettings) {
                     SourcesSettingsView()
                 }
+                // Certificates sheet (shown when no certs or user chooses)
+                .sheet(isPresented: $showCertificatesSheet) {
+                    CertificatesSheet(certStore: certStore)
+                }
+                // Install status sheet
+                .sheet(isPresented: $showInstallStatus) {
+                    if let _ = installingVersion {
+                        InstallStatusView(signing: signing)
+                    } else {
+                        EmptyView()
+                    }
+                }
             }
         }
         .environment(\.layoutDirection, appLanguage == "ar" ? .rightToLeft : .leftToRight)
+    }
+
+    // MARK: - Install flow
+    private func startInstall(for app: FeedApp, version: FeedVersion) {
+        // If no certificates, show certificate import sheet
+        if certStore.certificates.isEmpty {
+            // Opens certificates UI so user can add one
+            showCertificatesSheet = true
+            return
+        }
+
+        // Choose a certificate to use (here we pick the first remembered certificate).
+        guard let cert = certStore.certificates.first else {
+            showCertificatesSheet = true
+            return
+        }
+
+        // Prepare to show install status UI
+        installingVersion = version
+        showInstallStatus = true
+
+        // Start background task to download IPA and call SigningService.sign(...)
+        Task.detached(priority: .background) {
+            // 1. Download IPA to temporary path
+            guard let ipaURL = version.downloadURL else {
+                await MainActor.run {
+                    signing.phase = .failed("No download URL for version.")
+                }
+                return
+            }
+
+            let dest = signing.tempDir.appendingPathComponent("\(app.bundleIdentifier)-\(version.version).ipa")
+            do {
+                let (data, _) = try await URLSession.shared.data(from: ipaURL)
+                try data.write(to: dest, options: .atomic)
+            } catch {
+                await MainActor.run {
+                    signing.phase = .failed("Download failed: \(error.localizedDescription)")
+                }
+                return
+            }
+
+            // 2. Resolve P12 and provision profile paths & password
+            // Using assumed field names per user's instruction
+            guard let p12URL = cert.fileURL else {
+                await MainActor.run {
+                    signing.phase = .failed("P12 not available for selected certificate.")
+                }
+                return
+            }
+
+            let p12Password = cert.password ?? ""
+
+            // pick a provisioning profile (simplest: first one)
+            let profileURL = profileStore.profiles.first?.fileURL
+            guard let profile = profileURL else {
+                await MainActor.run {
+                    signing.phase = .failed("No provisioning profile available.")
+                }
+                return
+            }
+
+            // 3. Call the synchronous C++ binding (runs in background thread)
+            await MainActor.run {
+                signing.phase = .signing
+            }
+
+            let outputURL = signing.workDir.appendingPathComponent("\(app.bundleIdentifier)-signed.ipa")
+            let result = SigningService.sign(
+                ipa: dest,
+                p12: p12URL,
+                password: p12Password,
+                profile: profile,
+                bundleId: app.bundleIdentifier,
+                output: outputURL,
+                tempDir: signing.tempDir,
+                removeExtensions: false,
+                enableDocuments: false
+            )
+
+            await MainActor.run {
+                if result.ok {
+                    signing.phase = .done(result.message)
+                } else {
+                    signing.phase = .failed(result.message)
+                }
+            }
+
+            // optional: trigger local install server or OTA flow here using outputURL
+        }
     }
 }
