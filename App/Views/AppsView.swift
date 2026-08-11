@@ -283,15 +283,16 @@ struct AppsView: View {
             }
 
             // 2. Resolve P12 and provision profile paths & password
-            // Using assumed field names per user's instruction
-            guard let p12URL = cert.fileURL else {
+            // Use CertificateStore APIs (file paths + saved passwords)
+            let p12URL = certStore.fileURL(for: cert)
+            guard FileManager.default.fileExists(atPath: p12URL.path) else {
                 await MainActor.run {
                     signing.phase = .failed("P12 not available for selected certificate.")
                 }
                 return
             }
 
-            let p12Password = cert.password ?? ""
+            let p12Password = certStore.savedPassword(for: cert) ?? ""
 
             // pick a provisioning profile (simplest: first one)
             let profileURL = profileStore.profiles.first.map { profileStore.fileURL(for: $0) }
