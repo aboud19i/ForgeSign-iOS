@@ -8,11 +8,17 @@ struct AppsView: View {
     @AppStorage("appLanguage") private var appLanguage: String = "ar"
 
     @StateObject private var signing = SigningService()
+    @StateObject private var installController = InstallController()
     @State private var selectedApp: FeedApp?
     @State private var showSourcesSettings = false
     @State private var showCertificatesSheet = false
     @State private var showInstallStatus = false
     @State private var installingVersion: FeedVersion? = nil
+
+    // per-app install status (bundleIdentifier -> status text)
+    @State private var installStatusMap: [String: String] = [:]
+    // pending install to resume after certificate import
+    @State private var pendingInstall: (app: FeedApp, version: FeedVersion)? = nil
 
     var featuredApps: [FeedApp] {
         Array(store.apps.prefix(5))
@@ -70,11 +76,8 @@ struct AppsView: View {
                                         ForEach(featuredApps, id: \.bundleIdentifier) { app in
                                             Button(action: { selectedApp = app }) {
                                                 VStack(alignment: .leading, spacing: 8) {
-
-                                                    // Featured card: background image (banner/image/icon) with dark gradient overlay
                                                     ZStack(alignment: .bottomLeading) {
                                                         let bgURL = app.bannerURL ?? app.imageURL ?? app.iconURL
-
                                                         if let bgURL = bgURL {
                                                             AsyncImage(url: bgURL) { phase in
                                                                 switch phase {
@@ -99,13 +102,11 @@ struct AppsView: View {
                                                                 .frame(height: 170)
                                                         }
 
-                                                        // Dark gradient overlay to improve text contrast
                                                         LinearGradient(gradient: Gradient(colors: [Color.black.opacity(0.48), Color.black.opacity(0.10)]), startPoint: .bottom, endPoint: .center)
                                                             .cornerRadius(16)
                                                             .frame(height: 170)
                                                             .clipped()
 
-                                                        // Bottom content: small icon, title, description, GET button
                                                         HStack(spacing: 12) {
                                                             AsyncImage(url: app.iconURL) { img in
                                                                 img.resizable().scaledToFill()
@@ -162,41 +163,58 @@ struct AppsView: View {
 
                                 LazyVStack(spacing: 12) {
                                     ForEach(store.apps, id: \.bundleIdentifier) { app in
-                                        Button(action: { selectedApp = app }) {
-                                            HStack(spacing: 14) {
-                                                AsyncImage(url: app.iconURL) { img in
-                                                    img.resizable().scaledToFill()
-                                                } placeholder: {
-                                                    Color.gray.opacity(0.3)
-                                                }
-                                                .frame(width: 52, height: 52)
-                                                .cornerRadius(12)
-
-                                                VStack(alignment: .leading, spacing: 4) {
-                                                    Text(app.title ?? "App")
-                                                        .font(T.sans(15, .bold))
-                                                        .foregroundColor(T.ink)
-                                                        .lineLimit(1)
-
-                                                    Text(app.description ?? app.developer ?? "")
-                                                        .font(T.sans(12, .regular))
-                                                        .foregroundColor(T.ink2)
-                                                        .lineLimit(1)
-                                                }
-
-                                                Spacer()
-
-                                                Text(appLanguage == "ar" ? "تثبيت" : "GET")
-                                                    .font(T.sans(13, .bold))
-                                                    .foregroundColor(T.accent)
-                                                    .padding(.horizontal, 16)
-                                                    .padding(.vertical, 6)
-                                                    .background(T.accent.opacity(0.18))
-                                                    .clipShape(Capsule())
+                                        HStack(spacing: 14) {
+                                            AsyncImage(url: app.iconURL) { img in
+                                                img.resizable().scaledToFill()
+                                            } placeholder: {
+                                                Color.gray.opacity(0.3)
                                             }
-                                            .padding(12)
-                                            .fGlass(cornerRadius: 14)
+                                            .frame(width: 52, height: 52)
+                                            .cornerRadius(12)
+
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text(app.title ?? "App")
+                                                    .font(T.sans(15, .bold))
+                                                    .foregroundColor(T.ink)
+                                                    .lineLimit(1)
+
+                                                Text(app.description ?? app.developer ?? "")
+                                                    .font(T.sans(12, .regular))
+                                                    .foregroundColor(T.ink2)
+                                                    .lineLimit(1)
+                                            }
+
+                                            Spacer()
+
+                                            // Install button now triggers direct install flow
+                                            let bundle = app.bundleIdentifier
+                                            let statusText = installStatusMap[bundle]
+
+                                            Button(action: {
+                                                initiateInstall(for: app)
+                                            }) {
+                                                if let s = statusText {
+                                                    Text(s)
+                                                        .font(T.sans(13, .bold))
+                                                        .foregroundColor(.white)
+                                                        .padding(.horizontal, 12)
+                                                        .padding(.vertical, 6)
+                                                        .background(T.accent)
+                                                        .clipShape(Capsule())
+                                                } else {
+                                                    Text(appLanguage == "ar" ? "تثبيت" : "GET")
+                                                        .font(T.sans(13, .bold))
+                                                        .foregroundColor(T.accent)
+                                                        .padding(.horizontal, 16)
+                                                        .padding(.vertical, 6)
+                                                        .background(T.accent.opacity(0.18))
+                                                        .clipShape(Capsule())
+                                                }
+                                            }
+                                            .disabled(statusText != nil && statusText != "Failed")
                                         }
+                                        .padding(12)
+                                        .fGlass(cornerRadius: 14)
                                     }
                                 }
                                 .padding(.horizontal, 16)
@@ -217,7 +235,6 @@ struct AppsView: View {
                     }
                 }
                 .sheet(item: $selectedApp) { app in
-                    // Pass a real onInstall handler so installs start immediately
                     AppDetailSheet(app: app, onInstall: { version in
                         startInstall(for: app, version: version)
                     })
@@ -225,11 +242,9 @@ struct AppsView: View {
                 .sheet(isPresented: $showSourcesSettings) {
                     SourcesSettingsView()
                 }
-                // Certificates sheet (shown when no certs or user chooses)
                 .sheet(isPresented: $showCertificatesSheet) {
                     CertificatesSheet(certStore: certStore)
                 }
-                // Install status sheet
                 .sheet(isPresented: $showInstallStatus) {
                     if let _ = installingVersion {
                         InstallStatusView(signing: signing)
@@ -240,35 +255,53 @@ struct AppsView: View {
             }
         }
         .environment(\.layoutDirection, appLanguage == "ar" ? .rightToLeft : .leftToRight)
+        .onChange(of: certStore.certificates) { _ in
+            // If certificates were just added and a pending install exists, resume
+            if let pending = pendingInstall, !certStore.certificates.isEmpty {
+                pendingInstall = nil
+                startInstall(for: pending.app, version: pending.version)
+            }
+        }
     }
 
-    // MARK: - Install flow
-    private func startInstall(for app: FeedApp, version: FeedVersion) {
-        // If no certificates, show certificate import sheet
+    // MARK: - Install helpers
+    private func initiateInstall(for app: FeedApp) {
+        // Pick first/most-recent version
+        guard let version = app.versions.first else {
+            installStatusMap[app.bundleIdentifier] = appLanguage == "ar" ? "لا توجد نسخة متاحة" : "No versions available"
+            // clear after a few seconds
+            Task { try? await Task.sleep(nanoseconds: 3 * NSEC_PER_SEC); await MainActor.run { installStatusMap[app.bundleIdentifier] = nil } }
+            return
+        }
+
+        // If no certificates, open certs sheet and set pendingInstall
         if certStore.certificates.isEmpty {
-            // Opens certificates UI so user can add one
+            pendingInstall = (app, version)
             showCertificatesSheet = true
             return
         }
 
-        // Choose a certificate to use (here we pick the first remembered certificate).
-        guard let cert = certStore.certificates.first else {
-            showCertificatesSheet = true
-            return
-        }
+        // Start the install flow
+        startInstall(for: app, version: version)
+    }
 
-        // Prepare to show install status UI
+    private func startInstall(for app: FeedApp, version: FeedVersion) {
+        let bundle = app.bundleIdentifier
         installingVersion = version
         showInstallStatus = true
 
-        // Start background task to download IPA and call SigningService.sign(...)
+        // Start background task
         Task.detached(priority: .background) {
-            // Capture actor-isolated values on the main actor before heavy work
+            // 0. prepare: capture tempDir on main actor
             let tempDir: URL = await MainActor.run { signing.tempDir }
 
-            // 1. Download IPA to temporary path
+            // update status: Downloading
+            await MainActor.run { installStatusMap[bundle] = appLanguage == "ar" ? "Downloading…" : "Downloading…" }
+
+            // 1. Download IPA
             guard let ipaURL = version.downloadURL else {
                 await MainActor.run {
+                    installStatusMap[bundle] = appLanguage == "ar" ? "لا يوجد رابط تحميل" : "No download URL"
                     signing.phase = .failed("No download URL for version.")
                 }
                 return
@@ -280,41 +313,38 @@ struct AppsView: View {
                 try data.write(to: dest, options: .atomic)
             } catch {
                 await MainActor.run {
+                    installStatusMap[bundle] = appLanguage == "ar" ? "فشل التنزيل" : "Download failed"
                     signing.phase = .failed("Download failed: \(error.localizedDescription)")
                 }
                 return
             }
 
-            // 2. Resolve P12 and provision profile paths & password
-            // Use CertificateStore APIs (file paths + saved passwords) — these are MainActor-isolated
-            let p12URL = await MainActor.run { certStore.fileURL(for: cert) }
+            // 2. Resolve P12 and password
+            let p12URL: URL = await MainActor.run { certStore.fileURL(for: certStore.certificates.first!) }
             guard FileManager.default.fileExists(atPath: p12URL.path) else {
                 await MainActor.run {
+                    installStatusMap[bundle] = appLanguage == "ar" ? "الشهادة غير متوفرة" : "P12 not available"
                     signing.phase = .failed("P12 not available for selected certificate.")
                 }
                 return
             }
+            let p12Password: String = await MainActor.run { certStore.savedPassword(for: certStore.certificates.first!) ?? "" }
 
-            let p12Password: String = await MainActor.run { certStore.savedPassword(for: cert) ?? "" }
-
-            // pick a provisioning profile (simplest: first one)
-            let profileURL: URL? = await MainActor.run {
-                profileStore.profiles.first.map { profileStore.fileURL(for: $0) }
-            }
+            // pick a provisioning profile
+            let profileURL: URL? = await MainActor.run { profileStore.profiles.first.map { profileStore.fileURL(for: $0) } }
             guard let profile = profileURL else {
                 await MainActor.run {
+                    installStatusMap[bundle] = appLanguage == "ar" ? "لا يوجد ملف provisioning" : "No provisioning profile available"
                     signing.phase = .failed("No provisioning profile available.")
                 }
                 return
             }
 
-            // 3. Call the synchronous C++ binding (runs in background thread)
-            await MainActor.run {
-                signing.phase = .signing
-            }
+            // update status: Signing
+            await MainActor.run { installStatusMap[bundle] = appLanguage == "ar" ? "Signing…" : "Signing…"; signing.phase = .signing }
 
-            let workDir: URL = await MainActor.run { signing.workDir }
-            let outputURL = workDir.appendingPathComponent("\(app.bundleIdentifier)-signed.ipa")
+            // 3. Call signing (blocking bridging call)
+            let outputURL = await MainActor.run { signing.workDir.appendingPathComponent("\(app.bundleIdentifier)-signed.ipa") }
             let result = SigningService.sign(
                 ipa: dest,
                 p12: p12URL,
@@ -327,15 +357,37 @@ struct AppsView: View {
                 enableDocuments: false
             )
 
-            await MainActor.run {
-                if result.ok {
-                    signing.phase = .done(result.message)
-                } else {
+            if !result.ok {
+                await MainActor.run {
+                    installStatusMap[bundle] = appLanguage == "ar" ? "فشل التوقيع" : "Signing failed"
                     signing.phase = .failed(result.message)
                 }
+                return
             }
 
-            // optional: trigger local install server or OTA flow here using outputURL
+            await MainActor.run { installStatusMap[bundle] = appLanguage == "ar" ? "Signed — Installing…" : "Signed — Installing…" }
+
+            // 4. Trigger local install via InstallController on main actor
+            await MainActor.run {
+                installController.onDelivered = {
+                    // called when IPA delivered
+                    installStatusMap[bundle] = appLanguage == "ar" ? "IPA delivered. Accept prompt…" : "IPA delivered. Accept prompt…"
+                }
+                installController.install(ipa: outputURL, bundleId: result.signedBundleId.isEmpty ? app.bundleIdentifier : result.signedBundleId, version: result.signedVersion)
+            }
+
+            // Optionally update final status from installController.installStatus
+            // We'll poll/installController.publish via observing in the view lifecycle if needed.
+
+            // mark done after a short delay (the install prompt is handled by iOS)
+            await MainActor.run {
+                installStatusMap[bundle] = appLanguage == "ar" ? "تم البدء بالتثبيت" : "Install started"
+                signing.phase = .done(result.message)
+            }
+
+            // Clear status after 10 seconds to re-enable button
+            try? await Task.sleep(nanoseconds: 10 * NSEC_PER_SEC)
+            await MainActor.run { installStatusMap[bundle] = nil }
         }
     }
 }
