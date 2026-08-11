@@ -263,6 +263,9 @@ struct AppsView: View {
 
         // Start background task to download IPA and call SigningService.sign(...)
         Task.detached(priority: .background) {
+            // Capture actor-isolated values on the main actor before heavy work
+            let tempDir: URL = await MainActor.run { signing.tempDir }
+
             // 1. Download IPA to temporary path
             guard let ipaURL = version.downloadURL else {
                 await MainActor.run {
@@ -271,7 +274,7 @@ struct AppsView: View {
                 return
             }
 
-            let dest = signing.tempDir.appendingPathComponent("\(app.bundleIdentifier)-\(version.version).ipa")
+            let dest = tempDir.appendingPathComponent("\(app.bundleIdentifier)-\(version.version).ipa")
             do {
                 let (data, _) = try await URLSession.shared.data(from: ipaURL)
                 try data.write(to: dest, options: .atomic)
@@ -283,8 +286,8 @@ struct AppsView: View {
             }
 
             // 2. Resolve P12 and provision profile paths & password
-            // Use CertificateStore APIs (file paths + saved passwords)
-            let p12URL = certStore.fileURL(for: cert)
+            // Use CertificateStore APIs (file paths + saved passwords) — these are MainActor-isolated
+            let p12URL = await MainActor.run { certStore.fileURL(for: cert) }
             guard FileManager.default.fileExists(atPath: p12URL.path) else {
                 await MainActor.run {
                     signing.phase = .failed("P12 not available for selected certificate.")
@@ -292,10 +295,12 @@ struct AppsView: View {
                 return
             }
 
-            let p12Password = certStore.savedPassword(for: cert) ?? ""
+            let p12Password: String = await MainActor.run { certStore.savedPassword(for: cert) ?? "" }
 
             // pick a provisioning profile (simplest: first one)
-            let profileURL = profileStore.profiles.first.map { profileStore.fileURL(for: $0) }
+            let profileURL: URL? = await MainActor.run {
+                profileStore.profiles.first.map { profileStore.fileURL(for: $0) }
+            }
             guard let profile = profileURL else {
                 await MainActor.run {
                     signing.phase = .failed("No provisioning profile available.")
@@ -308,7 +313,8 @@ struct AppsView: View {
                 signing.phase = .signing
             }
 
-            let outputURL = signing.workDir.appendingPathComponent("\(app.bundleIdentifier)-signed.ipa")
+            let workDir: URL = await MainActor.run { signing.workDir }
+            let outputURL = workDir.appendingPathComponent("\(app.bundleIdentifier)-signed.ipa")
             let result = SigningService.sign(
                 ipa: dest,
                 p12: p12URL,
@@ -316,7 +322,7 @@ struct AppsView: View {
                 profile: profile,
                 bundleId: app.bundleIdentifier,
                 output: outputURL,
-                tempDir: signing.tempDir,
+                tempDir: tempDir,
                 removeExtensions: false,
                 enableDocuments: false
             )
