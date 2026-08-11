@@ -6,12 +6,17 @@ import UniformTypeIdentifiers
 final class SigningService: ObservableObject {
     enum Phase: Equatable {
         case idle
+        case downloading
         case signing
         case done(String)
         case failed(String)
     }
 
-    @Published var phase: Phase = .idle
+    @Published var phase: Phase = .idle {
+        didSet {
+            print("[SigningService] phase -> \(phase)")
+        }
+    }
 
     let tempDir: URL
     let workDir: URL
