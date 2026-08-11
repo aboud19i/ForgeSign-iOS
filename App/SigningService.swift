@@ -44,6 +44,42 @@ final class SigningService: ObservableObject {
         }
     }
 
+    /// Blocking sign call wrapper that runs the C++ signing inside a detached Task and
+    /// enforces a timeout watchdog to avoid UI hangs. The underlying C++ call may
+    /// not be cancellable; the watchdog will mark the operation as failed after
+    /// `timeout` seconds and return with a failure message while the background
+    /// thread may continue to run.
+    nonisolated static func signWithTimeout(ipa: URL, p12: URL, password: String, profile: URL,
+                                   bundleId: String, output: URL, tempDir: URL,
+                                   removeExtensions: Bool, enableDocuments: Bool,
+                                   timeout: TimeInterval = 120.0)
+    -> (ok: Bool, message: String, signedBundleId: String, signedVersion: String) {
+        print("[SigningService] signWithTimeout: starting sign task for \(ipa.path) with timeout \(timeout)s")
+
+        // Use a semaphore to wait for the detached Task to finish or timeout.
+        let sem = DispatchSemaphore(value: 0)
+        var result: (Bool, String, String, String) = (false, "Signing timed out.", "", "")
+
+        Task.detached {
+            print("[SigningService] signWithTimeout: running actual sign on background thread")
+            let res = sign(ipa: ipa, p12: p12, password: password, profile: profile,
+                           bundleId: bundleId, output: output, tempDir: tempDir,
+                           removeExtensions: removeExtensions, enableDocuments: enableDocuments)
+            result = (res.ok, res.message, res.signedBundleId, res.signedVersion)
+            sem.signal()
+        }
+
+        // Wait with timeout
+        let waitResult = sem.wait(timeout: .now() + timeout)
+        if waitResult == .timedOut {
+            print("[SigningService] signWithTimeout: timed out after \(timeout)s")
+            return (false, "Signing timed out after \(Int(timeout)) seconds.", "", "")
+        }
+
+        print("[SigningService] signWithTimeout: finished with ok=\(result.0) message=\(result.1)")
+        return result
+    }
+
     /// Runs the zsign signing engine. Blocking — call from a background task.
     /// Returns success, a message, the signed bundle identifier, and version.
     nonisolated static func sign(ipa: URL, p12: URL, password: String, profile: URL,
