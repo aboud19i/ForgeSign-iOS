@@ -279,7 +279,7 @@ struct AppsView: View {
                 }
                 .sheet(isPresented: $showInstallStatus) {
                     if let _ = installingVersion {
-                        InstallStatusView(signing: signing)
+                        InstallStatusView(signing: signing, installController: installController)
                     } else {
                         EmptyView()
                     }
@@ -337,6 +337,7 @@ struct AppsView: View {
             // 1. Download IPA
             guard let ipaURL = version.downloadURL else {
                 await MainActor.run {
+                    print("[AppsView] no download URL for \(bundle)")
                     installStatusMap[bundle] = appLanguage == "ar" ? "لا يوجد رابط تحميل" : "No download URL"
                     signing.phase = .failed("No download URL for version.")
                 }
@@ -344,12 +345,35 @@ struct AppsView: View {
             }
 
             let dest = tempDir.appendingPathComponent("\(app.bundleIdentifier)-\(version.version).ipa")
+
             do {
-                let (data, _) = try await URLSession.shared.data(from: ipaURL)
-                try data.write(to: dest, options: .atomic)
-            } catch {
+                // set downloading phase
                 await MainActor.run {
-                    installStatusMap[bundle] = appLanguage == "ar" ? "فشل التنزيل" : "Download failed"
+                    print("[AppsView] setting signing.phase = .downloading for \(bundle)")
+                    signing.phase = .downloading
+                    installStatusMap[bundle] = appLanguage == "ar" ? "Downloading…" : "Downloading…"
+                }
+
+                print("[AppsView] starting download from \(ipaURL.absoluteString) for \(bundle)")
+                let (tmpURL, response) = try await URLSession.shared.download(from: ipaURL)
+
+                if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                    let code = http.statusCode
+                    print("[AppsView] download HTTP error status: \(code) for \(bundle)")
+                    throw NSError(domain: "DownloadError", code: code, userInfo: [NSLocalizedDescriptionKey: "HTTP status \(code)"])
+                }
+
+                print("[AppsView] download finished, moving file to destination: \(dest.path) for \(bundle)")
+                try? FileManager.default.removeItem(at: dest)
+                try FileManager.default.moveItem(at: tmpURL, to: dest)
+
+                await MainActor.run { print("[AppsView] file moved to dest \(dest.path) for \(bundle)") }
+
+            } catch {
+                // Download failed
+                await MainActor.run {
+                    print("[AppsView] download error for \(bundle): \(error.localizedDescription)")
+                    installStatusMap[bundle] = appLanguage == "ar" ? "فشل التنزيل: \(error.localizedDescription)" : "Download failed: \(error.localizedDescription)"
                     signing.phase = .failed("Download failed: \(error.localizedDescription)")
                 }
                 return
@@ -359,6 +383,7 @@ struct AppsView: View {
             let p12URL: URL = await MainActor.run { certStore.fileURL(for: certStore.certificates.first!) }
             guard FileManager.default.fileExists(atPath: p12URL.path) else {
                 await MainActor.run {
+                    print("[AppsView] P12 not available for \(bundle)")
                     installStatusMap[bundle] = appLanguage == "ar" ? "الشهادة غير متوفرة" : "P12 not available"
                     signing.phase = .failed("P12 not available for selected certificate.")
                 }
@@ -370,6 +395,7 @@ struct AppsView: View {
             let profileURL: URL? = await MainActor.run { profileStore.profiles.first.map { profileStore.fileURL(for: $0) } }
             guard let profile = profileURL else {
                 await MainActor.run {
+                    print("[AppsView] provisioning profile not available for \(bundle)")
                     installStatusMap[bundle] = appLanguage == "ar" ? "لا يوجد ملف provisioning" : "No provisioning profile available"
                     signing.phase = .failed("No provisioning profile available.")
                 }
@@ -377,10 +403,14 @@ struct AppsView: View {
             }
 
             // update status: Signing
-            await MainActor.run { installStatusMap[bundle] = appLanguage == "ar" ? "Signing…" : "Signing…"; signing.phase = .signing }
+            await MainActor.run {
+                print("[AppsView] setting signing.phase = .signing for \(bundle)")
+                installStatusMap[bundle] = appLanguage == "ar" ? "Signing…" : "Signing…"; signing.phase = .signing
+            }
 
             // 3. Call signing (blocking bridging call)
             let outputURL = await MainActor.run { signing.workDir.appendingPathComponent("\(app.bundleIdentifier)-signed.ipa") }
+
             let result = SigningService.sign(
                 ipa: dest,
                 p12: p12URL,
@@ -393,9 +423,11 @@ struct AppsView: View {
                 enableDocuments: false
             )
 
+            print("[AppsView] signing result for \(bundle): ok=\(result.ok) message=\(result.message)")
+
             if !result.ok {
                 await MainActor.run {
-                    installStatusMap[bundle] = appLanguage == "ar" ? "فشل التوقيع" : "Signing failed"
+                    installStatusMap[bundle] = appLanguage == "ar" ? "فشل التوقيع: \(result.message)" : "Signing failed: \(result.message)"
                     signing.phase = .failed(result.message)
                 }
                 return
@@ -405,15 +437,19 @@ struct AppsView: View {
 
             // 4. Trigger local install via InstallController on main actor
             await MainActor.run {
+                print("[AppsView] invoking installController.install for \(bundle) at \(outputURL.path)")
                 installController.onDelivered = {
                     // called when IPA delivered
+                    print("[AppsView] installController.onDelivered for \(bundle)")
                     installStatusMap[bundle] = appLanguage == "ar" ? "IPA delivered. Accept prompt…" : "IPA delivered. Accept prompt…"
                 }
+
                 installController.install(ipa: outputURL, bundleId: result.signedBundleId.isEmpty ? app.bundleIdentifier : result.signedBundleId, version: result.signedVersion)
             }
 
             // mark done after a short delay (the install prompt is handled by iOS)
             await MainActor.run {
+                print("[AppsView] install started for \(bundle), setting signing.phase = .done")
                 installStatusMap[bundle] = appLanguage == "ar" ? "تم البدء بالتثبيت" : "Install started"
                 signing.phase = .done(result.message)
             }
