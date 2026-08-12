@@ -32,10 +32,23 @@ class SourceStore: ObservableObject {
                 guard let data = data, error == nil else { return }
 
                 do {
-                    let decodedResponse = try JSONDecoder().decode(SourceFeed.self, from: data)
-                    self?.apps = decodedResponse.apps
+                    // Try robust decoding to handle mojibake / wrong encoding from server
+                    if let raw = data.decodedUTF8String(), let jsonData = raw.data(using: .utf8) {
+                        let decodedResponse = try JSONDecoder().decode(SourceFeed.self, from: jsonData)
+                        self?.apps = decodedResponse.apps
+                    } else {
+                        // fallback to direct decode
+                        let decodedResponse = try JSONDecoder().decode(SourceFeed.self, from: data)
+                        self?.apps = decodedResponse.apps
+                    }
                 } catch {
                     print("Failed to decode JSON: \(error)")
+                    // For debugging: print a snippet of the raw text
+                    if let txt = String(data: data.prefix(1024), encoding: .utf8) {
+                        print("Raw (utf8) snippet: \(txt)")
+                    } else if let txt = String(data: data.prefix(1024), encoding: .isoLatin1) {
+                        print("Raw (latin1) snippet: \(txt)")
+                    }
                 }
             }
         }.resume()
