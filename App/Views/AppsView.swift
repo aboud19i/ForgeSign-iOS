@@ -380,6 +380,7 @@ struct AppsView: View {
                 }
 
                 print("[AppsView] starting download from \(ipaURL.absoluteString) for \(bundle)")
+                // perform download with URLSession
                 let (tmpURL, response) = try await URLSession.shared.download(from: ipaURL)
 
                 if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
@@ -436,7 +437,7 @@ struct AppsView: View {
             // 3. Call signing (blocking bridging call)
             let outputURL = await MainActor.run { signing.workDir.appendingPathComponent("\(app.bundleIdentifier)-signed.ipa") }
 
-            let result = SigningService.signWithTimeout(
+            let result = SigningService.sign(
                 ipa: dest,
                 p12: p12URL,
                 password: p12Password,
@@ -445,8 +446,7 @@ struct AppsView: View {
                 output: outputURL,
                 tempDir: tempDir,
                 removeExtensions: false,
-                enableDocuments: false,
-                timeout: 120.0
+                enableDocuments: false
             )
 
             print("[AppsView] signing result for \(bundle): ok=\(result.ok) message=\(result.message)")
@@ -551,7 +551,17 @@ struct AppsView: View {
                 // Signing
                 await MainActor.run { installStatusMap["local-import"] = appLanguage == "ar" ? "Signing…" : "Signing…"; signing.phase = .signing }
                 let outputURL = await MainActor.run { signing.workDir.appendingPathComponent("imported-signed.ipa") }
-                let result = SigningService.signWithTimeout(ipa: dest, p12: p12URL, password: p12Password, profile: profile, bundleId: "", output: outputURL, tempDir: tempDir, removeExtensions: false, enableDocuments: false, timeout: 120.0)
+                let result = SigningService.sign(
+                    ipa: dest,
+                    p12: p12URL,
+                    password: p12Password,
+                    profile: profile,
+                    bundleId: "",
+                    output: outputURL,
+                    tempDir: tempDir,
+                    removeExtensions: false,
+                    enableDocuments: false
+                )
 
                 if !result.ok {
                     await MainActor.run {
@@ -568,7 +578,7 @@ struct AppsView: View {
                     installController.onDelivered = {
                         installStatusMap["local-import"] = appLanguage == "ar" ? "IPA delivered. Accept prompt…" : "IPA delivered. Accept prompt…"
                     }
-                    installController.install(ipa: outputURL, bundleId: result.signedBundleId, version: result.signedVersion)
+                    installController.install(ipa: outputURL, bundleId: result.signedBundleId.isEmpty ? "" : result.signedBundleId, version: result.signedVersion)
                 }
 
                 await MainActor.run { signing.phase = .done(result.message); installStatusMap["local-import"] = appLanguage == "ar" ? "تم البدء بالتثبيت" : "Install started" }
