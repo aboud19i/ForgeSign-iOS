@@ -3,7 +3,7 @@ import SwiftUI
 struct LibraryView: View {
     @Environment(\.forgeTheme) private var T
     @EnvironmentObject private var certStore: CertificateStore
-    @AppStorage("app_language") private var appLanguage: String = "ar"
+    @AppStorage("appLanguage") private var appLanguage: String = "ar"
     
     @State private var showCertificatesSheet = false
 
