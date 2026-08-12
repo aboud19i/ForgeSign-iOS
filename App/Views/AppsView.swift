@@ -1,4 +1,9 @@
 import SwiftUI
+import UniformTypeIdentifiers
+
+extension UTType {
+    static var ipaFile: UTType { UTType(filenameExtension: "ipa") ?? .data }
+}
 
 struct AppsView: View {
     @Environment(\.forgeTheme) private var T
@@ -14,6 +19,10 @@ struct AppsView: View {
     @State private var showCertificatesSheet = false
     @State private var showInstallStatus = false
     @State private var installingVersion: FeedVersion? = nil
+
+    // new states for IPA import
+    @State private var presentIPAImporter = false
+    @State private var importTargetApp: FeedApp? = nil
 
     // search text for filtering apps
     @State private var searchText: String = ""
@@ -258,6 +267,13 @@ struct AppsView: View {
                 .background { ForgeBackdrop() }
                 .navigationTitle(appLanguage == "ar" ? "التطبيقات" : "Apps")
                 .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button(action: { presentIPAImporter = true }) {
+                            Image(systemName: "square.and.arrow.down.on.square")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(T.accent)
+                        }
+                    }
                     ToolbarItem(placement: .navigationBarTrailing) {
                         Button(action: { showSourcesSettings = true }) {
                             Image(systemName: "slider.horizontal.3")
@@ -283,6 +299,15 @@ struct AppsView: View {
                     } else {
                         EmptyView()
                     }
+                }
+                .sheet(isPresented: $presentIPAImporter) {
+                    DocumentPicker(contentTypes: [UTType.ipaFile], onPick: { url in
+                        presentIPAImporter = false
+                        // start local install flow with a generic target (ask user later if needed)
+                        startInstallLocal(from: url)
+                    }, onCancel: {
+                        presentIPAImporter = false
+                    })
                 }
             }
         }
@@ -360,7 +385,7 @@ struct AppsView: View {
                 if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                     let code = http.statusCode
                     print("[AppsView] download HTTP error status: \(code) for \(bundle)")
-                    throw NSError(domain: "DownloadError", code: code, userInfo: [NSLocalizedDescriptionKey: "HTTP status \(code)"])
+                    throw NSError(domain: "DownloadError", code: code, userInfo: [NSLocalizedDescriptionKey: "HTTP status \(code)")
                 }
 
                 print("[AppsView] download finished, moving file to destination: \(dest.path) for \(bundle)")
@@ -411,7 +436,7 @@ struct AppsView: View {
             // 3. Call signing (blocking bridging call)
             let outputURL = await MainActor.run { signing.workDir.appendingPathComponent("\(app.bundleIdentifier)-signed.ipa") }
 
-            let result = SigningService.sign(
+            let result = SigningService.signWithTimeout(
                 ipa: dest,
                 p12: p12URL,
                 password: p12Password,
@@ -420,7 +445,8 @@ struct AppsView: View {
                 output: outputURL,
                 tempDir: tempDir,
                 removeExtensions: false,
-                enableDocuments: false
+                enableDocuments: false,
+                timeout: 120.0
             )
 
             print("[AppsView] signing result for \(bundle): ok=\(result.ok) message=\(result.message)")
@@ -459,4 +485,102 @@ struct AppsView: View {
             await MainActor.run { installStatusMap[bundle] = nil }
         }
     }
-}
+
+    // download helper with timeout & retries
+    private func downloadWithRetry(from url: URL, to dest: URL, timeout: TimeInterval = 60, maxRetries: Int = 3) async throws {
+        var attempt = 0
+        var backoff: TimeInterval = 1
+        while true {
+            attempt += 1
+            do {
+                var req = URLRequest(url: url, timeoutInterval: timeout)
+                req.httpMethod = "GET"
+                print("[download] attempt \(attempt) -> \(url.absoluteString)")
+                let (tmpURL, response) = try await URLSession.shared.download(for: req)
+                if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                    let code = http.statusCode
+                    print("[download] HTTP status \(code) for \(url.absoluteString)")
+                    throw NSError(domain: "DownloadError", code: code, userInfo: [NSLocalizedDescriptionKey: "HTTP status \(code)")
+                }
+                try? FileManager.default.removeItem(at: dest)
+                try FileManager.default.moveItem(at: tmpURL, to: dest)
+                print("[download] moved to \(dest.path)")
+                return
+            } catch {
+                print("[download] attempt \(attempt) failed: \(error.localizedDescription)")
+                if attempt >= maxRetries {
+                    throw error
+                }
+                try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
+                backoff *= 2
+                continue
+            }
+        }
+    }
+
+    private func startInstallLocal(from localURL: URL) {
+        Task.detached(priority: .background) {
+            let tempDir: URL = await MainActor.run { signing.tempDir }
+            let dest = tempDir.appendingPathComponent(localURL.lastPathComponent)
+
+            do {
+                let scoped = localURL.startAccessingSecurityScopedResource()
+                defer { if scoped { localURL.stopAccessingSecurityScopedResource() } }
+                try? FileManager.default.removeItem(at: dest)
+                try FileManager.default.copyItem(at: localURL, to: dest)
+
+                // Resolve p12 and profile
+                let p12URL: URL = await MainActor.run { certStore.fileURL(for: certStore.certificates.first!) }
+                guard FileManager.default.fileExists(atPath: p12URL.path) else {
+                    await MainActor.run {
+                        installStatusMap["local-import"] = appLanguage == "ar" ? "الشهادة غير متوفرة" : "P12 not available"
+                        signing.phase = .failed("P12 not available for selected certificate.")
+                    }
+                    return
+                }
+                let p12Password: String = await MainActor.run { certStore.savedPassword(for: certStore.certificates.first!) ?? "" }
+                let profileURL: URL? = await MainActor.run { profileStore.profiles.first.map { profileStore.fileURL(for: $0) } }
+                guard let profile = profileURL else {
+                    await MainActor.run {
+                        installStatusMap["local-import"] = appLanguage == "ar" ? "لا يوجد ملف provisioning" : "No provisioning profile available"
+                        signing.phase = .failed("No provisioning profile available.")
+                    }
+                    return
+                }
+
+                // Signing
+                await MainActor.run { installStatusMap["local-import"] = appLanguage == "ar" ? "Signing…" : "Signing…"; signing.phase = .signing }
+                let outputURL = await MainActor.run { signing.workDir.appendingPathComponent("imported-signed.ipa") }
+                let result = SigningService.signWithTimeout(ipa: dest, p12: p12URL, password: p12Password, profile: profile, bundleId: "", output: outputURL, tempDir: tempDir, removeExtensions: false, enableDocuments: false, timeout: 120.0)
+
+                if !result.ok {
+                    await MainActor.run {
+                        installStatusMap["local-import"] = appLanguage == "ar" ? "فشل التوقيع: \(result.message)" : "Signing failed: \(result.message)"
+                        signing.phase = .failed(result.message)
+                    }
+                    return
+                }
+
+                await MainActor.run { installStatusMap["local-import"] = appLanguage == "ar" ? "Signed — Installing…" : "Signed — Installing…" }
+
+                // deliver via installController
+                await MainActor.run {
+                    installController.onDelivered = {
+                        installStatusMap["local-import"] = appLanguage == "ar" ? "IPA delivered. Accept prompt…" : "IPA delivered. Accept prompt…"
+                    }
+                    installController.install(ipa: outputURL, bundleId: result.signedBundleId, version: result.signedVersion)
+                }
+
+                await MainActor.run { signing.phase = .done(result.message); installStatusMap["local-import"] = appLanguage == "ar" ? "تم البدء بالتثبيت" : "Install started" }
+
+                try? await Task.sleep(nanoseconds: 10 * NSEC_PER_SEC)
+                await MainActor.run { installStatusMap["local-import"] = nil }
+
+            } catch {
+                await MainActor.run {
+                    installStatusMap["local-import"] = appLanguage == "ar" ? "فشل الاستيراد: \(error.localizedDescription)" : "Import failed: \(error.localizedDescription)"
+                    signing.phase = .failed("Import failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
